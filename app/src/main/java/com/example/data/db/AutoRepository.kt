@@ -1,7 +1,6 @@
 package com.example.data.db
 
 import android.content.Context
-import androidx.room.Room
 import kotlinx.coroutines.flow.Flow
 
 class AutoRepository(private val db: AppDatabase) {
@@ -94,11 +93,7 @@ class AutoRepository(private val db: AppDatabase) {
 
         fun getInstance(context: Context): AutoRepository {
             return INSTANCE ?: synchronized(this) {
-                val db = Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabase::class.java,
-                    "autodrive_launcher.db"
-                ).fallbackToDestructiveMigration().build()
+                val db = AppDatabase.getInstance(context.applicationContext)
                 val repo = AutoRepository(db)
                 INSTANCE = repo
                 repo

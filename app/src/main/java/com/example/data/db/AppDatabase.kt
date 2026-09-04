@@ -1,82 +1,166 @@
 package com.example.data.db
 
-import androidx.room.*
+import android.content.Context
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 
-@Dao
 interface MapDao {
-    @Query("SELECT * FROM cached_tiles WHERE regionName = :region")
     fun getTilesByRegion(region: String): Flow<List<MapTileEntity>>
-
-    @Query("SELECT COUNT(*) FROM cached_tiles")
     fun getCachedTileCount(): Flow<Int>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTiles(tiles: List<MapTileEntity>)
-
-    @Query("DELETE FROM cached_tiles")
     suspend fun clearTileCache()
-
-    @Query("SELECT * FROM offline_routes ORDER BY lastUpdated DESC")
     fun getAllOfflineRoutes(): Flow<List<OfflineRouteEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRoute(route: OfflineRouteEntity)
-
-    @Query("SELECT * FROM offline_pois WHERE category = :category OR :category = 'ALL'")
     fun getPois(category: String): Flow<List<OfflinePoiEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPois(pois: List<OfflinePoiEntity>)
 }
 
-@Dao
 interface RadioDao {
-    @Query("SELECT * FROM radio_stations ORDER BY frequency ASC")
     fun getAllStations(): Flow<List<RadioStationEntity>>
-
-    @Query("SELECT * FROM radio_stations WHERE isFavorite = 1 ORDER BY frequency ASC")
     fun getFavorites(): Flow<List<RadioStationEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertStations(stations: List<RadioStationEntity>)
-
-    @Update
     suspend fun updateStation(station: RadioStationEntity)
 }
 
-@Dao
 interface ObdDao {
-    @Query("SELECT * FROM obd_trip_logs ORDER BY startTime DESC LIMIT 20")
     fun getRecentTrips(): Flow<List<TripLogEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTrip(trip: TripLogEntity)
-
-    @Query("SELECT * FROM dtc_error_codes WHERE isCleared = 0")
     fun getActiveDtcCodes(): Flow<List<DtcCodeEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDtcCode(code: DtcCodeEntity)
-
-    @Query("UPDATE dtc_error_codes SET isCleared = 1")
     suspend fun clearAllDtcCodes()
 }
 
-@Database(
-    entities = [
-        MapTileEntity::class,
-        OfflineRouteEntity::class,
-        OfflinePoiEntity::class,
-        RadioStationEntity::class,
-        TripLogEntity::class,
-        DtcCodeEntity::class
-    ],
-    version = 1,
-    exportSchema = false
-)
-abstract class AppDatabase : RoomDatabase() {
+abstract class AppDatabase {
     abstract fun mapDao(): MapDao
     abstract fun radioDao(): RadioDao
     abstract fun obdDao(): ObdDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        fun getInstance(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val db = AppDatabaseImpl(context.applicationContext)
+                INSTANCE = db
+                db
+            }
+        }
+    }
 }
+
+class AppDatabaseImpl(private val context: Context) : AppDatabase() {
+
+    private val mapDaoImpl = object : MapDao {
+        private val tilesFlow = MutableStateFlow<List<MapTileEntity>>(emptyList())
+        private val routesFlow = MutableStateFlow<List<OfflineRouteEntity>>(emptyList())
+        private val poisFlow = MutableStateFlow<List<OfflinePoiEntity>>(emptyList())
+
+        override fun getTilesByRegion(region: String): Flow<List<MapTileEntity>> {
+            return tilesFlow.map { list -> list.filter { it.regionName == region } }
+        }
+
+        override fun getCachedTileCount(): Flow<Int> {
+            return tilesFlow.map { it.size }
+        }
+
+        override suspend fun insertTiles(tiles: List<MapTileEntity>) {
+            val currentMap = tilesFlow.value.associateBy { it.tileKey }.toMutableMap()
+            tiles.forEach { currentMap[it.tileKey] = it }
+            tilesFlow.value = currentMap.values.toList()
+        }
+
+        override suspend fun clearTileCache() {
+            tilesFlow.value = emptyList()
+        }
+
+        override fun getAllOfflineRoutes(): Flow<List<OfflineRouteEntity>> {
+            return routesFlow.asStateFlow()
+        }
+
+        override suspend fun insertRoute(route: OfflineRouteEntity) {
+            routesFlow.value = listOf(route) + routesFlow.value
+        }
+
+        override fun getPois(category: String): Flow<List<OfflinePoiEntity>> {
+            return poisFlow.map { list ->
+                if (category == "ALL") list else list.filter { it.category == category }
+            }
+        }
+
+        override suspend fun insertPois(pois: List<OfflinePoiEntity>) {
+            val currentMap = poisFlow.value.associateBy { it.name }.toMutableMap()
+            pois.forEach { currentMap[it.name] = it }
+            poisFlow.value = currentMap.values.toList()
+        }
+    }
+
+    private val radioDaoImpl = object : RadioDao {
+        private val stationsFlow = MutableStateFlow<List<RadioStationEntity>>(emptyList())
+
+        override fun getAllStations(): Flow<List<RadioStationEntity>> {
+            return stationsFlow.map { list -> list.sortedBy { it.frequency } }
+        }
+
+        override fun getFavorites(): Flow<List<RadioStationEntity>> {
+            return stationsFlow.map { list -> list.filter { it.isFavorite }.sortedBy { it.frequency } }
+        }
+
+        override suspend fun insertStations(stations: List<RadioStationEntity>) {
+            val currentMap = stationsFlow.value.associateBy { it.frequency }.toMutableMap()
+            stations.forEach { currentMap[it.frequency] = it }
+            stationsFlow.value = currentMap.values.sortedBy { it.frequency }
+        }
+
+        override suspend fun updateStation(station: RadioStationEntity) {
+            val current = stationsFlow.value.toMutableList()
+            val index = current.indexOfFirst { it.frequency == station.frequency }
+            if (index >= 0) {
+                current[index] = station
+            } else {
+                current.add(station)
+            }
+            stationsFlow.value = current.sortedBy { it.frequency }
+        }
+    }
+
+    private val obdDaoImpl = object : ObdDao {
+        private val tripsFlow = MutableStateFlow<List<TripLogEntity>>(emptyList())
+        private val dtcCodesFlow = MutableStateFlow<List<DtcCodeEntity>>(emptyList())
+
+        override fun getRecentTrips(): Flow<List<TripLogEntity>> {
+            return tripsFlow.asStateFlow()
+        }
+
+        override suspend fun insertTrip(trip: TripLogEntity) {
+            val updated = (listOf(trip) + tripsFlow.value).take(20)
+            tripsFlow.value = updated
+        }
+
+        override fun getActiveDtcCodes(): Flow<List<DtcCodeEntity>> {
+            return dtcCodesFlow.map { list -> list.filter { !it.isCleared } }
+        }
+
+        override suspend fun insertDtcCode(code: DtcCodeEntity) {
+            val current = dtcCodesFlow.value.toMutableList()
+            val index = current.indexOfFirst { it.code == code.code }
+            if (index >= 0) {
+                current[index] = code
+            } else {
+                current.add(code)
+            }
+            dtcCodesFlow.value = current
+        }
+
+        override suspend fun clearAllDtcCodes() {
+            dtcCodesFlow.value = dtcCodesFlow.value.map { it.copy(isCleared = true) }
+        }
+    }
+
+    override fun mapDao(): MapDao = mapDaoImpl
+    override fun radioDao(): RadioDao = radioDaoImpl
+    override fun obdDao(): ObdDao = obdDaoImpl
+}
+
